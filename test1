@@ -1,7 +1,3 @@
-# dataset: Movielens
-# method：matrix decomposition
-# language:python
-
 import pandas as pd
 import numpy as np
 from keras import Model
@@ -10,33 +6,48 @@ from keras.layers import Embedding, Reshape, Input, Dot
 
 
 # 获得用户数和电影数
-rating = pd.read_csv("C:/Users/L/Desktop/ratings.csv",sep=",")
-num_user = np.max(rating["userId"])
-num_movie = np.max(rating["movieId"])
+ratings_df = pd.read_csv("C:/Users/L/Desktop/ratings.csv",sep=",")
 
-# 对电影Id进行处理，添加一列索引
+
+# 添加电影Id的索引
 movies_df = pd.read_csv('C:/Users/L/Desktop/movies.csv')
-# movies_df['movieRow'] = movies_df.index
-print(num_user,num_movie,len(rating))
-# print(rating["userId"].values)
-# print(rating["movieId"].values)
+movies_df['movieRow'] = movies_df.index
+movies_df = movies_df[['movieRow', 'movieId', 'title']]
+# print(movies_df)
+
+# 提取用户Id、电影索引、评分生成新的数组，便于后面的使用
+ratings_df = pd.merge(ratings_df, movies_df, on='movieId')
+ratings_df = ratings_df[['userId', 'movieRow', 'rating']]
+# print(ratings_df)
+
+# print(num_user,num_movie)
+
+# 获取行数和列数，填充评分，形成打分矩阵
+
+num_user = np.max(ratings_df["userId"])
+num_movie = np.max(movies_df['movieRow'])+1
+
+# print(num_user)
+# print(num_movie)
 
 
-train_user = rating["userId"].values
-train_movie = rating["movieId"].values
+train_user = ratings_df["userId"].values
+train_movie = ratings_df["movieRow"].values
 train_x = [train_user,train_movie]
-train_y = rating["rating"].values
+train_y = ratings_df["rating"].values
 
 array = np.zeros((num_user+1,num_movie+1))
-print(array.shape)
+# print(array)
+# print(array.shape)
 
-for index,row in rating.iterrows():
-    s = index
+for index,row in ratings_df.iterrows():
     int1 = int(row['userId'])
-    int2 = int(row['movieId'])
+    int2 = int(row['movieRow'])
     array[int1,int2] = row['rating']
 
 print(array)
+print(array.shape)
+# print(array.dtype)
 record = np.array(array>0,dtype=int)
 print(record)
 
@@ -64,12 +75,12 @@ model = Recmand_model(num_user,num_movie,100)
 
 
 
-model.fit(train_x,train_y,batch_size = 150,epochs =1)
+model.fit(train_x,train_y,batch_size = 150,epochs =20)
 
 # result = model.predict(record)
 
-a = input("请输入用户名：")
-user = int(a)
+name = input("请输入用户名：")
+user = int(name)
 result = np.array([])
 
 for i in range(num_movie):
@@ -90,4 +101,4 @@ c = recommend[-3]
 d = recommend[-4]
 e = recommend[-5]
 print('为用户%d推荐的电影为：\n1:%s\n2:%s\n3:%s\n4:%s\n5:%s。' \
-      % (user,movies_df['title'][a], movies_df['title'][b], movies_df['title'][c], movies_df['title'][d],movies_df['title'][e]))
+      % (user,movies_df.iloc[a]['title'], movies_df.iloc[b]['title'], movies_df.iloc[c]['title'], movies_df.iloc[d]['title'],movies_df.iloc[e]['title']))
