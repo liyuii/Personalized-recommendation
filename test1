@@ -10,7 +10,7 @@ ratings_df = pd.read_csv("C:/Users/L/Desktop/ratings.csv",sep=",")
 
 
 # 添加电影Id的索引
-movies_df = pd.read_csv('C:/Users/L/Desktop/movies.csv')
+movies_df = pd.read_csv('C:/Users/L/Desktop/movies.csv',encoding='unicode_escape')
 movies_df['movieRow'] = movies_df.index
 movies_df = movies_df[['movieRow', 'movieId', 'title']]
 # print(movies_df)
@@ -77,22 +77,23 @@ model = Recmand_model(num_user,num_movie,100)
 
 model.fit(train_x,train_y,batch_size = 150,epochs =20)
 
-# result = model.predict(record)
+# result = model.predict()
 
 name = input("请输入用户名：")
 user = int(name)
 result = np.array([])
 
 for i in range(num_movie):
-    temp = model.predict([[user],[i]])
+    temp = model.predict([np.array([user]),np.array([i])])
     result = np.append(result,temp)
 
-print(user)
-print(result)
+# print(user)
+# print(result)
 
 for i in range(num_movie):
     if record[user][i] == 1 :
         result[i] = 0
+
 recommend = np.argsort(result)
 
 a = recommend[-1]
@@ -102,3 +103,4 @@ d = recommend[-4]
 e = recommend[-5]
 print('为用户%d推荐的电影为：\n1:%s\n2:%s\n3:%s\n4:%s\n5:%s。' \
       % (user,movies_df.iloc[a]['title'], movies_df.iloc[b]['title'], movies_df.iloc[c]['title'], movies_df.iloc[d]['title'],movies_df.iloc[e]['title']))
+
