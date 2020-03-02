@@ -1,0 +1,440 @@
+
+# 这是用Keras写的推荐系统的模型，分别对用户和电影的特征训练出等长的特征向量，再做矩阵乘法，由此得出预测的评分，其中文本特征采用卷积神经网络进行训练
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from keras import Model
+import keras.backend as K
+import tensorflow as tf
+from keras.layers import Embedding, Reshape, Input, Dot,Dense,concatenate,Conv2D,MaxPool2D,Flatten,Lambda,Dropout
+from keras.models import Sequential
+from keras.layers.core import Lambda
+
+# 读取文件
+ratings_df = pd.read_csv("C:/Users/L/Desktop/ratings.csv",sep=",")
+movies_df = pd.read_csv('C:/Users/L/Desktop/movies.csv',encoding='unicode_escape')
+user_df = pd.read_csv("C:/Users/L/Desktop/user.csv")
+ratings_df = ratings_df[['userId','movieId','rating']]
+movies_orig = pd.read_csv('C:/Users/L/Desktop/movies.csv',encoding='unicode_escape')
+# print("movies_orig")
+# print(movies_orig)
+
+# 改变User数据中性别和年龄
+gender_map = {'F': 0, 'M': 1}
+user_df['gender'] = user_df['gender'].map(gender_map)
+
+age_map = {1:0,18:1,25:2,35:3,45:4,50:5,56:6}
+
+user_df['age'] = user_df['age'].map(age_map)
+# print(user_df)
+
+print('-----------------------------------------------------')
+
+
+# 读取Movie数据集
+
+# # 电影类型转数字字典
+genres_set = set()
+for val in movies_df['genres'].str.split('|'):
+    genres_set.update(val)
+
+# print(genres_set)
+
+genres_set.add('NULL')
+
+genres2int = {val: ii for ii, val in enumerate(genres_set)}
+
+# print(genres2int)
+
+# 将电影类型转成等长数字列表，长度是20
+genres_map = {val: [genres2int[row] for row in val.split('|')] for ii, val in enumerate(set(movies_df['genres']))}
+
+# print(genres_map)
+
+# 将电影类型转成等长数字列表，长度是20
+for key in genres_map:
+    for cnt in range(max(genres2int.values()) - len(genres_map[key])):
+        genres_map[key].insert(len(genres_map[key]) + cnt, genres2int['NULL'])
+
+movies_df['genres'] = movies_df['genres'].map(genres_map)
+
+# print(movies_df['genres'][0])
+
+print('-----------------------------------------------------')
+
+# 电影Title转数字字典
+title_set = set()
+for val in movies_df['title'].str.split():
+    title_set.update(val)
+
+# print(title_set)
+
+title_set.add('<PAD>')
+title2int = {val: ii for ii, val in enumerate(title_set)}
+
+# print(title2int)
+
+# 将电影Title转成等长数字列表，长度是20
+title_count = 20
+title_map = {val:[title2int[row] for row in val.split()] for ii,val in enumerate(set(movies_df['title']))}
+
+#
+for key in title_map:
+    for cnt in range(title_count - len(title_map[key])):
+        title_map[key].insert(len(title_map[key]) + cnt,title2int['<PAD>'])
+
+movies_df['title'] = movies_df['title'].map(title_map)
+
+# print(movies_df['title'])
+
+# 合并三个表
+data = pd.merge(pd.merge(ratings_df, user_df), movies_df)
+# print(data.dtypes)
+# print(data.iloc[1])
+# 将数据分成X和y两张表
+target_fields = ['rating']
+features_pd, targets_pd = data.drop(target_fields, axis=1), data[target_fields]
+
+findex = features_pd.index
+features = features_pd.values
+targets_values = targets_pd.values
+
+
+# 电影ID转下标的字典，数据集中电影ID跟下标不一致，比如第5行的数据电影ID不一定是5
+movieid2idx = {val[0]:i for i, val in enumerate(movies_df.values)}
+
+
+# 嵌入矩阵的维度
+embed_dim = 32
+# 用户ID个数  610 + 1 = 611
+uid_max = max(features.take(0,1)) + 1
+# 年龄类别个数    6 + 1 = 7
+age_max = max(features.take(2,1)) + 1
+# 性别个数  1 + 1 = 2
+gender_max = max(features.take(3,1)) + 1
+# 职业个数  20 + 1 = 21
+job_max = max(features.take(4,1)) + 1
+
+# 电影ID个数   9741 + 1 = 9742
+movie_num = movieid2idx[max(features.take(1,1))]+1
+movie_id_max = max(features.take(1,1))+1
+# 电影类型个数    18 + 1 = 19
+movie_categories_max = max(genres2int.values()) + 1
+# 电影名单词个数   11610
+movie_title_max = len(title_set)
+
+# 行数
+row_max = max(findex)+1
+
+# 对电影类型嵌入向量做加和操作的标志，考虑过使用mean做平均，但是没实现mean
+combiner = "sum"
+
+# 电影名长度 20
+sentences_size = title_count
+# 文本卷积滑动窗口，分别滑动2, 3, 4, 5个单词
+window_sizes = [2, 3, 4, 5]
+# 文本卷积核数量
+filter_num = 8
+
+# 标记
+array = np.zeros((uid_max,movie_num ))
+
+for index,row in ratings_df.iterrows():
+    int1 = int(row['userId'])
+    int2 = int(movieid2idx[row['movieId']])
+    array[int1,int2] = row['rating']
+
+record = np.array(array>0,dtype=int)
+
+# print(record.shape)
+# print(record)
+
+
+# 定义超参
+num_epochs = 1
+# Batch Size
+batch_size = 256
+
+dropout_keep = 0.5
+# Learning Rate
+learning_rate = 0.0001
+# Show stats for every n number of batches
+show_every_n_batches = 20
+
+
+uid = features.take(0, 1)
+user_gender = features.take(3, 1)
+user_age = features.take(2, 1)
+user_job = features.take(4, 1)
+movie_id = features.take(1, 1)
+movie_categories = features.take(6, 1)
+# movie_titles = features.take(5, 1)
+
+categories = np.zeros([row_max, 20])
+for i in range(row_max):
+    categories[i] = features.take(6, 1)[i]
+
+movie_categories = categories
+print("movie_categories处理完成")
+
+movie_titles = features.take(5, 1)
+
+titles = np.zeros([row_max, 20])  # sentences_size
+for i in range(row_max):
+    titles[i] = features.take(5, 1)[i]
+
+movie_titles = titles
+
+print("movie_titles处理完成")
+
+# titles = np.zeros([row_max, 20])  # sentences_size
+# for i in range(row_max):
+#     titles[i] = features.take(5, 1)[i]
+#
+#
+
+
+K.clear_session()
+
+# 构建一个顺序模型
+
+# 获取用户特征，将各特征做简单的拼接即可
+def get_user_feature_layer(input_uid,input_age,input_gender,input_job):
+
+    # uid
+    # input_uid = Input(shape=[None,], dtype="int32")            # (?, ?)
+    print(input_uid)
+    embedding1 = Embedding(uid_max,embed_dim , input_length=1)(input_uid)       # (?, ?, 32)
+    # uid = np.reshape(features.take(0, 1), [row_max, 1])
+    # inputs.append(uid)
+    print(embedding1)
+    embedding1 = Reshape((1,embed_dim))(embedding1)        # (?, 1, 32)
+    print(embedding1)
+    # print(embedding1.shape)
+
+    # user_age
+    # input_age = Input(shape=[None], dtype="int32")
+    embedding2 =Embedding(age_max,32 ,input_length=1)(input_age)
+    embedding2 = Reshape((1, embed_dim))(embedding2)
+    # user_age = np.reshape(features.take(2, 1), [row_max, 1])
+    # inputs.append(user_age)
+
+    # user_gender
+    # input_gender = Input(shape=[None], dtype="int32")
+    embedding3 = Embedding(gender_max,32, input_length=1)(input_gender)
+    embedding3 = Reshape((1, embed_dim))(embedding3)
+    # user_gender = np.reshape(features.take(3, 1), [row_max, 1])
+    # inputs.append(user_gender)
+
+    # user_job
+    # input_job = Input(shape=[None], dtype="int32")
+    embedding4 = Embedding(job_max,32, input_length=1)(input_job)
+    embedding4 = Reshape((1, embed_dim))(embedding4)
+    # user_job = np.reshape(features.ta ke(4, 1), [row_max, 1])
+    # inputs.append(user_job)
+
+    x = concatenate([embedding1, embedding2,embedding3,embedding4],axis=2)
+
+    print(x)
+    user_combine_layer = Dense(200, activation='relu')(x)
+    user_combine_layer = Reshape((200,))(user_combine_layer)
+
+    # 这里的报错为：NOT CONVERTIBLE TO TENSOR，应该是输入有误
+    model = Model(inputs=[input_uid, input_age,input_gender,input_job], outputs=user_combine_layer)
+
+    model.compile(loss='mse',optimizer='adam')
+    print(user_combine_layer.shape)                 # (?, 1, 200)
+    # print(model.summary())
+
+    return model
+
+# result = get_user_feature_layer()
+print("******************************************************************************")
+
+# 卷积神经网络提取词向量特征
+def get_movie_title_layer(input_movie_title):
+    # movie_title
+    # input_movie_title = Input(shape=[None,], dtype="int32")
+    embedding3 = Embedding(movie_id_max,embed_dim , input_length=20)(input_movie_title)
+    # print(embedding3)
+    embedding3 = Reshape((20,embed_dim,1))(embedding3)
+    # embedding3 = Lambda(lambda embedding3: K.sum(embedding3, axis=1, keepdims=True))(embedding3)
+
+    print(embedding3)
+    # cnn
+    x = Conv2D(filters= 32, kernel_size=(window_sizes[0],embed_dim), padding='valid', activation='relu')(embedding3)
+    y = Conv2D(filters= 32, kernel_size=(window_sizes[1],embed_dim), padding='valid', activation='relu')(embedding3)
+    z = Conv2D(filters= 32, kernel_size=(window_sizes[2],embed_dim), padding='valid', activation='relu')(embedding3)
+
+    print(x)
+    print(y)
+    print(z)
+
+    maxpool_0 = MaxPool2D(pool_size=(sentences_size - window_sizes[0]+1,1),strides=(1,1),padding='valid')(x)
+    maxpool_1 = MaxPool2D(pool_size=(sentences_size - window_sizes[1]+1,1),strides=(1,1),padding='valid')(y)
+    maxpool_2 = MaxPool2D(pool_size=(sentences_size - window_sizes[2]+1,1),strides=(1,1),padding='valid')(z)
+
+    print(maxpool_0)
+    print(maxpool_1)
+    print(maxpool_2)
+
+    concatenated_tensor = concatenate([maxpool_0, maxpool_1, maxpool_2],axis=1)
+    flatten = Flatten()(concatenated_tensor)
+    dropout = Dropout(dropout_keep)(flatten)
+    # print(dropout)
+    movie_combine_layer = Dense(32, activation='relu')(dropout)       # (?,32)
+
+    # embedding3 = Reshape((1, embed_dim))(movie_combine_layer)       # (?,1,32)
+
+    model = Model(inputs=[input_movie_title], outputs=movie_combine_layer)
+
+    model.compile(loss='mse',optimizer='adam')
+
+    print("movie_combine_layer")
+    print(movie_combine_layer)
+    print(movie_combine_layer.shape)
+
+    return model
+
+
+print("******************************************************************************")
+
+
+def get_movie_feature_layer(input_movie_id,input_movie_categories,input_movie_title):
+    # uid
+    # input_movie_id = Input(shape=[None,], dtype="int32")
+    embedding1 = Embedding(movie_id_max,embed_dim , input_length=1)(input_movie_id)
+    print(embedding1)
+    embedding1 = Reshape((1,embed_dim))(embedding1)         # (?, 1, 32)
+    print(embedding1)
+
+    # movie_categories
+    # input_movie_categories = Input(shape=[None,], dtype="int32")
+    embedding2 = Embedding(movie_categories_max,embed_dim , input_length=20)(input_movie_categories)
+    print(embedding2)
+    embedding2 = Reshape((20,embed_dim))(embedding2)        # (?, 20, 32)
+    print(embedding2)
+    # added = add(embedding2)
+    # embedding2 = K.sum(embedding2, axis=1, keepdims=True)   # (?, 1, 32)
+
+    embedding2 = Lambda(lambda embedding2: K.sum(embedding2, axis=1, keepdims=True))(embedding2)
+
+    print(embedding2)
+
+    # movie_title
+    # input_movie_title = Input(shape=[None,], dtype="int32")
+    embedding3 = Embedding(movie_id_max, embed_dim, input_length=20)(input_movie_title)
+    # print(embedding3)
+    embedding3 = Reshape((20, embed_dim, 1))(embedding3)
+    # embedding3 = Lambda(lambda embedding3: K.sum(embedding3, axis=1, keepdims=True))(embedding3)
+
+    print(embedding3)
+    # cnn
+    x = Conv2D(filters=32, kernel_size=(window_sizes[0], embed_dim), padding='valid', activation='relu')(embedding3)
+    y = Conv2D(filters=32, kernel_size=(window_sizes[1], embed_dim), padding='valid', activation='relu')(embedding3)
+    z = Conv2D(filters=32, kernel_size=(window_sizes[2], embed_dim), padding='valid', activation='relu')(embedding3)
+
+    print(x)
+    print(y)
+    print(z)
+
+    maxpool_0 = MaxPool2D(pool_size=(sentences_size - window_sizes[0] + 1, 1), strides=(1, 1), padding='valid')(x)
+    maxpool_1 = MaxPool2D(pool_size=(sentences_size - window_sizes[1] + 1, 1), strides=(1, 1), padding='valid')(y)
+    maxpool_2 = MaxPool2D(pool_size=(sentences_size - window_sizes[2] + 1, 1), strides=(1, 1), padding='valid')(z)
+
+    print(maxpool_0)
+    print(maxpool_1)
+    print(maxpool_2)
+
+    concatenated_tensor = concatenate([maxpool_0, maxpool_1, maxpool_2], axis=1)
+    flatten = Flatten()(concatenated_tensor)
+    dropout = Dropout(dropout_keep)(flatten)
+    # print(dropout)
+    movie_combine_layer = Dense(32, activation='relu')(dropout)  # (?,32)
+
+    embedding3 = Reshape((1, embed_dim))(movie_combine_layer)       # (?,1,32)
+
+
+    print("************** test ***************")
+    print(embedding3)
+
+    # 连接
+    concat = concatenate([embedding1, embedding2, embedding3], axis=2)
+
+    # my_concat = Lambda(K.concatenate([embedding1, embedding2], axis=2))
+    # x = my_concat([embedding1, embedding2])
+
+    print("concat")
+    print(concat)
+
+    movie_combine_layer = Dense(200, activation='relu')(concat)
+    movie_combine_layer = Reshape((200,))(movie_combine_layer)
+
+    # 这里的报错为：NOT CONVERTIBLE TO TENSOR，应该是输入有误
+    model = Model(inputs=[input_movie_id, input_movie_categories, input_movie_title], outputs=movie_combine_layer)
+
+    model.compile(loss='mse',optimizer='adam')
+    # print(model.summary())
+    print("movie_combine_layer")
+    print(movie_combine_layer.shape)
+
+    return model
+
+
+# result = get_movie_feature_layer()
+
+
+
+def merge_model():
+
+    input_uid = Input(shape=[None, ], dtype="int32")
+    input_age = Input(shape=[None], dtype="int32")
+    input_gender = Input(shape=[None], dtype="int32")
+    input_job = Input(shape=[None], dtype="int32")
+    input_movie_id = Input(shape=[None, ], dtype="int32")
+    input_movie_categories = Input(shape=[None, ], dtype="int32")
+    input_movie_title = Input(shape=[None, ], dtype="int32")
+
+    model_1 = get_user_feature_layer(input_uid,input_age,input_gender,input_job)
+    print("model1执行完毕")
+    # model_3 = get_movie_title_layer(input_movie_title)
+    # print("model3执行完毕")
+    # # 卷积后的特征向量作为model_2的输入
+    # title_layer = model_3.output
+
+    # 注意,如果报错，可能是这里的问题
+    # embedding3 = Reshape((1, embed_dim))(title_layer)
+    model_2 = get_movie_feature_layer(input_movie_id,input_movie_categories,input_movie_title)
+
+    print("model2执行完毕")
+    users_matrics = model_1.output
+    movie_matrics = model_2.output
+
+    print("现在开始做用户和电影的向量内积....")
+    # temp = K.transpose(movie_matrics)
+    # print(temp)
+    out = Dot(1)([users_matrics, movie_matrics])
+    print("out")
+    print(out)
+    # score = Lambda(lambda embedding3,temp:tf.matmul(users_matrics,temp))(users_matrics,temp)
+    # print(score)
+    print("before")
+    model = Model(inputs=[input_uid,input_age,input_gender,input_job,input_movie_id,input_movie_categories,input_movie_title], outputs=out)
+    print("after")
+    model.compile(loss='mse', optimizer='Adam',metrics=['accuracy'])
+
+    return model
+
+last_model = merge_model()
+
+print("训练结束")
+
+last_model.fit([uid,user_age,user_gender,user_job,movie_id,movie_categories,movie_titles],targets_values,batch_size = 128,epochs =10)
+print("保存中...")
+last_model.save("D:\Anaconda\Pycharm\content\myrepo\my_mdoel.h5")
+print("程序结束")
+# last_model.evaluate()
+
+# last_model.summary()
+
